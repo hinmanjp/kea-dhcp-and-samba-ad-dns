@@ -28,18 +28,12 @@
 # your setup e.g. self-compiled Samba
 #export PATH=/usr/local/samba/bin:/usr/local/samba/sbin:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
 
-##########################################################################
-#                                                                        #
-#    You can optionally add the 'macAddress' to the Computers object.    #
-#    Add 'dhcpduser' to the 'Domain Admins' group if used                #
-#    Change the next line to 'yes' to make this happen                   #
-Add_macAddress='no'
-#                                                                        #
-##########################################################################
-
 Add_ReverseZones='no'
 
 realm_fromsmbconf='yes'
+
+# Samba DNS Server hostname
+Server=$(hostname -s)
 
 # On FreeBSD change this to /usr/local/etc/dhcpduser.keytab
 keytab=/etc/dhcpduser.keytab
@@ -176,9 +170,6 @@ BINDIR=$(samba -b | grep 'BINDIR' | grep -v 'SBINDIR' | awk '{print $NF}')
 [[ -z $BINDIR ]] && logger "Cannot find the 'samba' binary, is it installed?\\nOr is your path set correctly ?\\n"
 WBINFO="$BINDIR/wbinfo"
 
-# DHCP Server hostname
-Server=$(hostname -s)
-
 if [ "$realm_fromsmbconf"=='yes' ]; then
   if [ ! -f /etc/samba/smb.conf ]; then
       logger "Required /etc/samba/smb.conf not found, it needs to be created."
@@ -220,7 +211,7 @@ if [ -z "${TESTUSER}" ]; then
 fi
 
 # Check for Kerberos keytab
-if [ ! -f /etc/dhcpduser.keytab ]; then
+if [ ! -f "$keytab" ]; then
     logger "Required keytab $keytab not found, it needs to be created."
     logger "Use the following commands as root"
     logger "samba-tool domain exportkeytab --principal=${SETPRINCIPAL} $keytab"
