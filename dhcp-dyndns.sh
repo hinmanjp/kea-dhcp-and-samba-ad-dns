@@ -3,10 +3,9 @@
 #
 # /usr/local/bin/dhcp-dyndns.sh
 #
-# This script is for secure DDNS updates on Samba,
-# it can also add the 'macAddress' to the Computers object.
+# This script is for secure DDNS updates on Samba.
 #
-# Version: 0.9.5
+# Version: 0.9.5 patch-mkaraki-1
 #
 # Copyright (C) Rowland Penny 2020-2022
 #
@@ -22,6 +21,14 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# LEGAL INFORMATION:
+#  Original Script: Rowland Penny
+#   Original Source: https://wiki.samba.org/index.php/Configure_DHCP_to_update_DNS_records
+#  Modify script for kea-dhcp: Jean-Philippe Martin
+#   Original Source: https://www.spinics.net/lists/samba/msg176222.html
+#
+# Merge scripts and fix some bugs: mkaraki
 
 # You may need to ensure that you have a useful path
 # If you have 'path' problems, Uncomment the next line and adjust for
