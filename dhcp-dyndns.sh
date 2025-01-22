@@ -35,7 +35,42 @@
 # your setup e.g. self-compiled Samba
 #export PATH=/usr/local/samba/bin:/usr/local/samba/sbin:/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
 
-Add_ReverseZones='no'
+# ******  PREREQUISITES  ******
+<<comment
+# create a user that will run the script
+samba-tool user create dhcpduser --description="Unprivileged user for TSIG-GSSAPI DNS updates via ISC DHCP server" --random-password
+
+# never expire password
+samba-tool user setexpiry dhcpduser --noexpiry
+
+# add user the the DnsAdmins group
+samba-tool group addmembers DnsAdmins dhcpduser
+
+# export keytab
+# On FreeBSD change /etc/dhcpduser.keytab to /usr/local/etc/dhcpduser.keytab
+DOMAIN=$(hostname -d)
+REALM=${DOMAIN^^}
+samba-tool domain exportkeytab --principal=dhcpduser@$REALM /etc/dhcpduser.keytab
+
+# change owner to the system running the kea dhcp service
+KEA_USER=$(ps aux | grep kea-dhcp4 | grep -v grep | head -n 1 | grep -Eo "^[^ ]+")
+chown $KEA_USER:$KEA_USER  /etc/dhcpduser.keytab
+chmod 400  /etc/dhcpduser.keytab
+
+comment
+
+
+
+##########################################################################
+#                                                                        #
+#    You can optionally add the 'macAddress' to the Computers object.    #
+#    Add 'dhcpduser' to the 'Domain Admins' group if used                #
+#    Change the next line to 'yes' to make this happen                   #
+Add_macAddress='no'
+#                                                                        #
+##########################################################################
+
+Add_ReverseZones='yes'
 
 realm_fromsmbconf='yes'
 
@@ -49,14 +84,10 @@ notused_handle() {
     logger "notused function call ${*}"
     exit 123
 }
+
 unknown_handle() {
     logger "Unhandled function call ${*}"
     exit 123
-}
-
-
-lease4_recover () {
-    ...
 }
 
 leases4_committed () {
@@ -68,6 +99,7 @@ lease4_decline () {
     logger "leases4_committed function call ${*}"
     exit 123
 }
+
 case "$1" in
     "lease4_renew")
         action="lease4_renew"
@@ -117,7 +149,7 @@ _KERBEROS () {
 # get current time as a number
 test=$(date +%d'-'%m'-'%y' '%H':'%M':'%S)
 # Note: there have been problems with this
-# check that 'date' returns something like
+# check that 'date' returns something like 22-01-25 20:18:43
 
 # Check for valid kerberos ticket
 #logger "${test} [dyndns] : Running check for valid kerberos ticket"
@@ -210,7 +242,18 @@ TESTUSER="$($WBINFO -u | grep 'dhcpduser')"
 if [ -z "${TESTUSER}" ]; then
     logger "No AD dhcp user exists, need to create it first.. exiting."
     logger "you can do this by typing the following commands"
-    logger "kinit Administrator@${REALM}"
+    members=$(samba-tool group listmembers "Domain Admins")
+
+   # Loop through members to find the first enabled one
+    for user in $members; do
+        # Check if the user is enabled
+        status=$(samba-tool user show "$user" | grep -c 'objectClass: user' )
+        if [ "$status" -gt 0 ]; then
+            break
+        fi
+    done
+    
+    logger "kinit $user@${REALM}"
     logger "samba-tool user create dhcpduser --random-password --description='Unprivileged user for DNS updates via ISC DHCP server'"
     logger "samba-tool user setexpiry dhcpduser --noexpiry"
     logger "samba-tool group addmembers DnsAdmins dhcpduser"
@@ -223,7 +266,7 @@ if [ ! -f "$keytab" ]; then
     logger "Use the following commands as root"
     logger "samba-tool domain exportkeytab --principal=${SETPRINCIPAL} $keytab"
     logger "chown XXXX:XXXX $keytab"
-    logger "Replace 'XXXX:XXXX' with the user & group that dhcpd runs as on your distro"
+    logger "Replace 'XXXX:XXXX' with the user & group that kea dhcp runs as on your distro"
     logger "chmod 400 $keytab"
     exit 1
 fi
@@ -235,21 +278,17 @@ ip="${LEASE4_ADDRESS}"
 DHCID="${LEASE4_CLIENT_ID}"
 name="${LEASE4_HOSTNAME%%.*}"
 
-# Exit if no ip address or mac-address
-if [ -z "${ip}" ]; then
-    logger "NO IP"
+
+# Exit if both ip address & mac address are missing
+if [ -z "${ip}" ] && [ -z "$DHCID" ]; then
+    logger "NO IP or MAC address"
     exit 1
 fi
 
-# Exit if no computer name supplied, unless the action is 'delete'
+# Exit if no computer name supplied - kea dhcp should always provide the hostname
 if [ -z "${name}" ]; then
-# change action label and test command
-    if [ "${action}" = "delete" ]; then
-        name=$(host -t PTR "${ip}" | awk '{print $NF}' | awk -F '.' '{print $1}')
-    else
-        logger "No hostname"
-        exit 1
-    fi
+    logger "No hostname"
+    exit 1
 fi
 
 # exit if name contains a space
@@ -386,5 +425,72 @@ if [ "$count" -eq 0 ]; then
         logger "DHCP-DNS $action succeeded"
     fi
 fi
+
+
+
+if [ "$Add_macAddress" != 'no' ]
+then
+	if [ -n "$DHCID" ]
+	then
+		Computer_Object=$(ldbsearch "$KTYPE" -H ldap://"$Server" "(&(objectclass=computer)(objectclass=ieee802Device)(cn=$name))" | grep -v '#' | grep -v 'ref:')
+		if [ -z "$Computer_Object" ]
+		then
+			# Computer object not found with the 'ieee802Device' objectclass, does the computer actually exist, it should.
+			Computer_Object=$(ldbsearch "$KTYPE" -H ldap://"$Server" "(&(objectclass=computer)(cn=$name))" | grep -v '#' | grep -v 'ref:')
+			if [ -z "$Computer_Object" ]
+			then
+				logger "Computer '$name' not found. Exiting."
+				exit 68
+			else
+				DN=$(echo "$Computer_Object" | grep 'dn:')
+				objldif="$DN
+changetype: modify
+add: objectclass
+objectclass: ieee802Device"
+
+				attrldif="$DN
+changetype: modify
+add: macAddress
+macAddress: $DHCID"
+
+				# add the ldif
+				echo "$objldif" | ldbmodify "$KTYPE" -H ldap://"$Server"
+				ret="$?"
+				if [ $ret -ne 0 ]
+				then
+					logger "Error modifying Computer objectclass $name in AD."
+					exit "${ret}"
+				fi
+				sleep 2
+				echo "$attrldif" | ldbmodify "$KTYPE" -H ldap://"$Server"
+				ret="$?"
+				if [ "$ret" -ne 0 ]; then
+					logger "Error modifying Computer attribute $name in AD."
+					exit "${ret}"
+				fi
+				unset objldif
+				unset attrldif
+				logger "Successfully modified Computer $name in AD"
+			fi
+	else
+		DN=$(echo "$Computer_Object" | grep 'dn:')
+		attrldif="$DN
+changetype: modify
+replace: macAddress
+macAddress: $DHCID"
+
+		echo "$attrldif" | ldbmodify "$KTYPE" -H ldap://"$Server"
+		ret="$?"
+		if [ "$ret" -ne 0 ]
+		then
+			logger "Error modifying Computer attribute $name in AD."
+			exit "${ret}"
+		fi
+			unset attrldif
+			logger "Successfully modified Computer $name in AD"
+		fi
+	fi
+fi
+
 
 exit 0
