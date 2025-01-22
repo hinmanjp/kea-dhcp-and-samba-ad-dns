@@ -66,6 +66,8 @@ comment
 #    You can optionally add the 'macAddress' to the Computers object.    #
 #    Add 'dhcpduser' to the 'Domain Admins' group if used                #
 #    Change the next line to 'yes' to make this happen                   #
+#    ldb-tools packages is required for this to work                     #
+#    apt install -y ldb-tools
 Add_macAddress='no'
 #                                                                        #
 ##########################################################################
@@ -153,7 +155,8 @@ test=$(date +%d'-'%m'-'%y' '%H':'%M':'%S)
 
 # Check for valid kerberos ticket
 #logger "${test} [dyndns] : Running check for valid kerberos ticket"
-klist -c "${KRB5CCNAME}" -s
+#klist -c "${KRB5CCNAME}" -s
+klist -c -s
 if [ "$?" != "0" ]; then
     logger "${test} [dyndns] : Getting new ticket, old one has expired"
     kinit -F -k -t $keytab "${SETPRINCIPAL}"
@@ -300,16 +303,16 @@ esac
 
 ## update ##
 case "${action}" in
-    lease4_renew|lease4_recover|lease4_release)
+    lease4_renew|lease4_recover)
 
         _KERBEROS
         count=0
         # does host have an existing 'A' record ?
-        A_REC=$(samba-tool dns query ${Server} ${domain} ${name} A -k yes 2>/dev/null | grep 'A:' | awk '{print $2}')
+        A_REC=$(samba-tool dns query ${Server} ${domain} ${name} A --use-kerberos=required 2>/dev/null | grep 'A:' | awk '{print $2}')
         if [[ -z $A_REC ]]; then
             # no A record to delete
             result1=0
-            samba-tool dns add ${Server} ${domain} "${name}" A ${ip} -k yes
+            samba-tool dns add ${Server} ${domain} "${name}" A ${ip} --use-kerberos=required 
             result2="$?"
         elif [ "$A_REC" = "${ip}" ]; then
               # Correct A record exists, do nothing
@@ -320,15 +323,15 @@ case "${action}" in
         elif [ "$A_REC" != "${ip}" ]; then
               # Wrong A record exists
               logger "'A' record changed, updating record."
-              samba-tool dns delete ${Server} ${domain} "${name}" A ${A_REC} -k yes
+              samba-tool dns delete ${Server} ${domain} "${name}" A ${A_REC} --use-kerberos=required
               result1="$?"
-              samba-tool dns add ${Server} ${domain} "${name}" A ${ip} -k yes
+              samba-tool dns add ${Server} ${domain} "${name}" A ${ip} --use-kerberos=required
               result2="$?"
         fi
 
         # get existing reverse zones (if any)
         if [ "$Add_ReverseZones" != 'no' ]; then
-            ReverseZones=$(samba-tool dns zonelist ${Server} -k yes --reverse | grep 'pszZoneName' | awk '{print $NF}')
+            ReverseZones=$(samba-tool dns zonelist ${Server} --use-kerberos=required --reverse | grep 'pszZoneName' | awk '{print $NF}')
             if [ -z "$ReverseZones" ]; then
                 logger "No reverse zone found, not updating"
                 result3='0'
@@ -342,11 +345,11 @@ case "${action}" in
                   if [[ ${ip} = $ZoneIP* ]] && [ "$ZoneIP" = "$RZIP" ]; then
                       logger "rev_zone_info zoneip $revzone ${ip} $ZoneIP ${IP2add}"
                       # does host have an existing 'PTR' record ?
-                      PTR_REC=$(samba-tool dns query ${Server} ${revzone} ${IP2add} PTR -k yes 2>/dev/null | grep 'PTR:' | awk '{print $2}' | awk -F '.' '{print $1}')
+                      PTR_REC=$(samba-tool dns query ${Server} ${revzone} ${IP2add} PTR --use-kerberos=required 2>/dev/null | grep 'PTR:' | awk '{print $2}' | awk -F '.' '{print $1}')
                       if [[ -z $PTR_REC ]]; then
                           # no PTR record to delete
                           result3=0
-                          samba-tool dns add ${Server} ${revzone} ${IP2add} PTR "${name}".${domain} -k yes
+                          samba-tool dns add ${Server} ${revzone} ${IP2add} PTR "${name}".${domain} --use-kerberos=required
                           result4="$?"
                           break
                       elif [ "$PTR_REC" = "${name}" ]; then
@@ -360,9 +363,9 @@ case "${action}" in
                             # Wrong PTR record exists
                             # points to wrong host
                             logger "'PTR' record changed, updating record."
-                            samba-tool dns delete ${Server} ${revzone} ${IP2add} PTR "${PTR_REC}".${domain} -k yes
+                            samba-tool dns delete ${Server} ${revzone} ${IP2add} PTR "${PTR_REC}".${domain} --use-kerberos=required
                             result3="$?"
-                            samba-tool dns add ${Server} ${revzone} ${IP2add} PTR "${name}".${domain} -k yes
+                            samba-tool dns add ${Server} ${revzone} ${IP2add} PTR "${name}".${domain} --use-kerberos=required
                             result4="$?"
                             break
                       fi
@@ -373,15 +376,15 @@ case "${action}" in
             fi
         fi
         ;;
- lease4_expire)
+ lease4_expire|lease4_release)
         _KERBEROS
 
         count=0
-        samba-tool dns delete ${Server} ${domain} "${name}" A ${ip} -k yes
+        samba-tool dns delete ${Server} ${domain} "${name}" A ${ip} --use-kerberos=required
         result1="$?"
         # get existing reverse zones (if any)
         if [ "$Add_ReverseZones" != 'no' ]; then
-            ReverseZones=$(samba-tool dns zonelist ${Server} --reverse -k yes | grep 'pszZoneName' | awk '{print $NF}')
+            ReverseZones=$(samba-tool dns zonelist ${Server} --reverse --use-kerberos=required | grep 'pszZoneName' | awk '{print $NF}')
             if [ -z "$ReverseZones" ]; then
                 logger "No reverse zone found, not updating"
                 result2='0'
@@ -393,7 +396,7 @@ case "${action}" in
                   if [[ ${ip} = $ZoneIP* ]] && [ "$ZoneIP" = "$RZIP" ]; then
                       host -t PTR ${ip} > /dev/null 2>&1
                       if [ "$?" -eq 0 ]; then
-                          samba-tool dns delete ${Server} ${revzone} ${IP2add} PTR "${name}".${domain} -k yes
+                          samba-tool dns delete ${Server} ${revzone} ${IP2add} PTR "${name}".${domain} --use-kerberos=required
                           result2="$?"
                       else
                           result2='0'
