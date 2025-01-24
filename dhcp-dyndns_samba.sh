@@ -82,134 +82,34 @@ Server=$(hostname -s)
 # On FreeBSD change this to /usr/local/etc/dhcpduser.keytab
 keytab=/etc/dhcpduser.keytab
 
-notused_handle() {
-    logger "notused function call ${*}"
+
+if ! [[ "$1" =~ ^(lease4_renew|lease4_recover|lease4_expire|lease4_release|leases4_committed)$ ]]; then 
+    logger "kea hookpoint not used: ${*}"
     exit 123
-}
-
-unknown_handle() {
-    logger "Unhandled function call ${*}"
-    exit 123
-}
-
-leases4_committed () {
-    logger "leases4_committed function call ${*}"
-    exit 123
-}
-
-lease4_decline () {
-    logger "leases4_committed function call ${*}"
-    exit 123
-}
-
-case "$1" in
-    "lease4_renew")
-        action="lease4_renew"
-        ;;
-    "lease4_expire")
-        action="lease4_expire"
-        ;;
-    "lease4_recover")
-        action="lease4_recover"
-        ;;
-    "leases4_committed")
-        leases4_committed
-        ;;
-    "lease4_release")
-        action="lease4_release"
-        ;;
-    "lease4_decline")
-        lease4_decline
-        ;;
-    "lease6_renew")
-        notused_handle
-        ;;
-    "lease6_rebind")
-        notused_handle
-        ;;
-    "lease6_expire")
-        notused_handle
-        ;;
-    "lease6_recover")
-        notused_handle
-        ;;
-    "leases6_committed")
-        notused_handle
-        ;;
-    "lease6_release")
-        notused_handle
-        ;;
-    "lease6_decline")
-        notused_handle
-        ;;
-    *)
-        unknown_handle "${@}"
-        ;;
-esac
-
-_KERBEROS () {
-# get current time as a number
-test=$(date +%d'-'%m'-'%y' '%H':'%M':'%S)
-# Note: there have been problems with this
-# check that 'date' returns something like 22-01-25 20:18:43
-
-# Check for valid kerberos ticket
-#logger "${test} [dyndns] : Running check for valid kerberos ticket"
-#klist -c "${KRB5CCNAME}" -s
-klist -c -s
-if [ "$?" != "0" ]; then
-    logger "${test} [dyndns] : Getting new ticket, old one has expired"
-    kinit -F -k -t $keytab "${SETPRINCIPAL}"
-    # On FreeBSD change the -F to --no-forwardable
-    if [ "$?" != "0" ]; then
-        logger "${test} [dyndns] : dhcpd kinit for dynamic DNS failed"
-        exit 1
-   fi
 fi
+
+
+calculate_reverse_dns_zones() {
+    local ip="$1"
+
+    # Split the IPv4 address into its octets
+    IFS='.' read -r octet1 octet2 octet3 octet4 <<< "$ip"
+    
+    # Create an array to store reverse DNS zones
+    zones=()
+    
+    # Most specific to least specific
+    zones+=("$octet4.$octet3.$octet2.$octet1.in-addr.arpa") # Full IP
+    zones+=("$octet3.$octet2.$octet1.in-addr.arpa")       # Subnet
+    zones+=("$octet2.$octet1.in-addr.arpa")               # Class C
+    zones+=("$octet1.in-addr.arpa")                        # Class B
+
+    echo "${zones[@]}"
 }
 
-rev_zone_info () {
-    local RevZone="$1"
-    local IP="$2"
-    local rzoneip
-    rzoneip=$(echo "$RevZone" | sed 's/\.in-addr.arpa//')
-    local rzonenum
-    rzonenum=$(echo "$rzoneip" |  tr '.' '\n')
-    declare -a words
-    for n in $rzonenum
-    do
-      words+=("$n")
-    done
-    local numwords="${#words[@]}"
-
-    unset ZoneIP
-    unset RZIP
-    unset IP2add
-
-    case "$numwords" in
-        1) # single ip rev zone '192'
-           ZoneIP=$(echo "${IP}" | awk -F '.' '{print $1}')
-           RZIP="${rzoneip}"
-           IP2add=$(echo "${IP}" | awk -F '.' '{print $4"."$3"."$2}')
-           ;;
-        2) # double ip rev zone '168.192'
-           ZoneIP=$(echo "${IP}" | awk -F '.' '{print $1"."$2}')
-           RZIP=$(echo "${rzoneip}" | awk -F '.' '{print $2"."$1}')
-           IP2add=$(echo "${IP}" | awk -F '.' '{print $4"."$3}')
-           ;;
-        3) # triple ip rev zone '0.168.192'
-           ZoneIP=$(echo "${IP}" | awk -F '.' '{print $1"."$2"."$3}')
-           RZIP=$(echo "${rzoneip}" | awk -F '.' '{print $3"."$2"."$1}')
-           IP2add=$(echo "${IP}" | awk -F '.' '{print $4}')
-           ;;
-        *) # should never happen
-           exit 1
-           ;;
-    esac
-}
 
 BINDIR=$(samba -b | grep 'BINDIR' | grep -v 'SBINDIR' | awk '{print $NF}')
-[[ -z $BINDIR ]] && logger "Cannot find the 'samba' binary, is it installed?\\nOr is your path set correctly ?\\n"
+[[ -z $BINDIR ]] && logger "Cannot find the 'samba' binary, is it installed?\nOr is your path set correctly ?\n"
 WBINFO="$BINDIR/wbinfo"
 
 if [ "$realm_fromsmbconf"=='yes' ]; then
@@ -275,13 +175,35 @@ if [ ! -f "$keytab" ]; then
 fi
 
 
+# Check for valid kerberos ticket
+#logger "${test} [dyndns] : Running check for valid kerberos ticket"
+klist -c -s 2>/dev/null
+if [ "$?" != "0" ]; then
+    logger "${test} [dyndns] : Getting new kerberos ticket, old one has expired"
+    kinit -F -k -t $keytab "${SETPRINCIPAL}" 
+    # On FreeBSD change the -F to --no-forwardable
+    if [ "$?" != "0" ]; then
+        logger "${test} [dyndns] : dhcpd kinit for dynamic DNS failed"
+        exit 1
+   fi
+fi
+
+
 # Variables supplied by dhcpd.conf
-#action="$1"
-ip="${LEASE4_ADDRESS}"
-DHCID="${LEASE4_CLIENT_ID}"
-name="${LEASE4_HOSTNAME%%.*}"
+if [ "$1" = "leases4_committed" ]; then
+    # can also lookup look up useful data based on the leases_committed query4_hwaddr value. 
+    # Example query: SELECT INET_NTOA(address), hostname FROM lease4 WHERE hwaddr = UNHEX('2CAA8ED7632C');
+    # Can also use:  echo '{"command":"lease4-get","arguments":{"identifier":"2c:aa:8e:d7:63:2c", "identifier-type": "hw-address", "subnet-id":2886799616}}' | socat UNIX:/tmp/kea4-ctrl-socket -,ignoreeof
+    ip="${LEASES4_AT0_ADDRESS}"
+    DHCID="${LEASES4_AT0_HWADDR}"
+    name="${LEASES4_AT0_HOSTNAME}"
+else
+    ip="${LEASE4_ADDRESS}"
+    DHCID="${LEASE4_CLIENT_ID}"
+    name="${LEASE4_HOSTNAME%%.*}"
+fi
 
-
+logger "Hook event: ${1}, IP: ${ip}, HWID: ${DHCID}, Name: ${name}"
 # Exit if both ip address & mac address are missing
 if [ -z "${ip}" ] && [ -z "$DHCID" ]; then
     logger "NO IP or MAC address"
@@ -301,18 +223,24 @@ case ${name} in
          ;;
 esac
 
-## update ##
-case "${action}" in
-    lease4_renew|lease4_recover)
 
-        _KERBEROS
+if [ "$Add_ReverseZones" != 'no' ]; then
+    dns_zones=( $(calculate_reverse_dns_zones "$ip") )
+    revzone=$(samba-tool dns zonelist ${Server} --use-kerberos=required | grep "pszZoneName" | grep -m 1 -o -P "( \K${dns_zones[1]})|( \K${dns_zones[2]})|( \K${dns_zones[3]})")
+    revip={dns_zones[0]}
+fi
+
+## create / update dns record ##
+case "$1" in
+    lease4_renew|lease4_recover|leases4_committed)
+
         count=0
         # does host have an existing 'A' record ?
         A_REC=$(samba-tool dns query ${Server} ${domain} ${name} A --use-kerberos=required 2>/dev/null | grep 'A:' | awk '{print $2}')
         if [[ -z $A_REC ]]; then
             # no A record to delete
             result1=0
-            samba-tool dns add ${Server} ${domain} "${name}" A ${ip} --use-kerberos=required 
+            samba-tool dns add ${Server} ${domain} "${name}" A ${ip} --use-kerberos=required 2>/dev/null
             result2="$?"
         elif [ "$A_REC" = "${ip}" ]; then
               # Correct A record exists, do nothing
@@ -323,90 +251,71 @@ case "${action}" in
         elif [ "$A_REC" != "${ip}" ]; then
               # Wrong A record exists
               logger "'A' record changed, updating record."
-              samba-tool dns delete ${Server} ${domain} "${name}" A ${A_REC} --use-kerberos=required
+              samba-tool dns delete ${Server} ${domain} "${name}" A ${A_REC} --use-kerberos=required 2>/dev/null
               result1="$?"
-              samba-tool dns add ${Server} ${domain} "${name}" A ${ip} --use-kerberos=required
+              samba-tool dns add ${Server} ${domain} "${name}" A ${ip} --use-kerberos=required 2>/dev/null
               result2="$?"
         fi
 
         # get existing reverse zones (if any)
         if [ "$Add_ReverseZones" != 'no' ]; then
-            ReverseZones=$(samba-tool dns zonelist ${Server} --use-kerberos=required --reverse | grep 'pszZoneName' | awk '{print $NF}')
-            if [ -z "$ReverseZones" ]; then
-                logger "No reverse zone found, not updating"
-                result3='0'
-                result4='0'
-                count=$((count+1))
-            else
-                for revzone in $ReverseZones
-                do
-                  rev_zone_info "$revzone" "${ip}"
-                  logger "rev_zone_info $revzone ${ip}"
-                  if [[ ${ip} = $ZoneIP* ]] && [ "$ZoneIP" = "$RZIP" ]; then
-                      logger "rev_zone_info zoneip $revzone ${ip} $ZoneIP ${IP2add}"
-                      # does host have an existing 'PTR' record ?
-                      PTR_REC=$(samba-tool dns query ${Server} ${revzone} ${IP2add} PTR --use-kerberos=required 2>/dev/null | grep 'PTR:' | awk '{print $2}' | awk -F '.' '{print $1}')
-                      if [[ -z $PTR_REC ]]; then
-                          # no PTR record to delete
-                          result3=0
-                          samba-tool dns add ${Server} ${revzone} ${IP2add} PTR "${name}".${domain} --use-kerberos=required
-                          result4="$?"
-                          break
-                      elif [ "$PTR_REC" = "${name}" ]; then
-                            # Correct PTR record exists, do nothing
-                            logger "Correct 'PTR' record exists, not updating."
-                            result3=0
-                            result4=0
-                            count=$((count+1))
-                            break
-                      elif [ "$PTR_REC" != "${name}" ]; then
-                            # Wrong PTR record exists
-                            # points to wrong host
-                            logger "'PTR' record changed, updating record."
-                            samba-tool dns delete ${Server} ${revzone} ${IP2add} PTR "${PTR_REC}".${domain} --use-kerberos=required
-                            result3="$?"
-                            samba-tool dns add ${Server} ${revzone} ${IP2add} PTR "${name}".${domain} --use-kerberos=required
-                            result4="$?"
-                            break
-                      fi
-                  else
-                      continue
-                  fi
-                done
+            
+            if [ -z $revzone ] ; then
+                # create a reverse lookup zone using the most specific zone
+                logger "No matching reverse zone found. Attempting to create ${dns_zones[0]}"
+                samba-tool dns zonecreate ${Server} ${dns_zones[1]} --use-kerberos=required >/dev/null
+                if [ $? -ne 0 ] ; then
+                    logger "Failed to create the reverse lookup zone. Can't do any updates. Exiting."
+                    break
+                else
+                    revzone=${dns_zones[0]}
+                fi
             fi
+            
+            # does host have an existing 'PTR' record ?
+            PTR_REC=$(samba-tool dns query ${Server} ${revzone} ${revip} PTR --use-kerberos=required 2>/dev/null | grep 'PTR:' | awk '{print $2}' | awk -F '.' '{print $1}')
+            if [[ -z $PTR_REC ]]; then
+              # no existing record. Create one.
+              result3=0
+              samba-tool dns add ${Server} ${revzone} ${ip} PTR "${name}".${domain} --use-kerberos=required 2>/dev/null
+              result4="$?"
+            elif [ "$PTR_REC" = "${name}" ]; then
+                # Correct PTR record exists, do nothing
+                logger "Correct 'PTR' record exists, not updating."
+                result3=0
+                result4=0
+                count=$((count+1))
+            elif [ "$PTR_REC" != "${name}" ]; then
+                # Wrong PTR record exists
+                # delete the existing record and create the correct one.
+                logger "'PTR' record changed, updating record."
+                samba-tool dns delete ${Server} ${revzone} ${revip} PTR "${PTR_REC}".${domain} --use-kerberos=required 2>/dev/null
+                result3="$?"
+                samba-tool dns add ${Server} ${revzone} ${revip} PTR "${name}".${domain} --use-kerberos=required 2>/dev/null
+                result4="$?"
+            fi
+  
         fi
         ;;
  lease4_expire|lease4_release)
-        _KERBEROS
 
         count=0
-        samba-tool dns delete ${Server} ${domain} "${name}" A ${ip} --use-kerberos=required
+        samba-tool dns delete ${Server} ${domain} "${name}" A ${ip} --use-kerberos=required 2>/dev/null
         result1="$?"
+        
         # get existing reverse zones (if any)
         if [ "$Add_ReverseZones" != 'no' ]; then
-            ReverseZones=$(samba-tool dns zonelist ${Server} --reverse --use-kerberos=required | grep 'pszZoneName' | awk '{print $NF}')
-            if [ -z "$ReverseZones" ]; then
+            if [ -z "$revzone" ]; then
                 logger "No reverse zone found, not updating"
                 result2='0'
                 count=$((count+1))
             else
-                for revzone in $ReverseZones
-                do
-                  rev_zone_info "$revzone" "${ip}"
-                  if [[ ${ip} = $ZoneIP* ]] && [ "$ZoneIP" = "$RZIP" ]; then
-                      host -t PTR ${ip} > /dev/null 2>&1
-                      if [ "$?" -eq 0 ]; then
-                          samba-tool dns delete ${Server} ${revzone} ${IP2add} PTR "${name}".${domain} --use-kerberos=required
-                          result2="$?"
-                      else
-                          result2='0'
-                          count=$((count+1))
-                      fi
-                      break
-                  else
-                      continue
-                  fi
-                done
+                # does a reverse lookup record exist for this ip address?
+                host -t PTR ${ip} > /dev/null 2>&1
+                if [ "$?" -eq 0 ]; then
+                  samba-tool dns delete ${Server} ${revzone} ${revip} PTR "${name}".${domain} --use-kerberos=required 2>/dev/null
+                  result2="$?"
+                fi
             fi
         fi
         result3='0'
